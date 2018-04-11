@@ -5,11 +5,19 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 from django.contrib.auth.models import User
 from opaque_keys.edx.keys import CourseKey, UsageKey
-from xblock.completable import XBlockCompletionMode
 from xblock.core import XBlock
 
 from . import waffle
 from .models import BlockCompletion
+
+
+class XBlockCompletionMode(object):
+    """
+    Enumeration for completion modes.
+    """
+    COMPLETABLE = "completable"
+    AGGREGATOR = "aggregator"
+    EXCLUDED = "excluded"
 
 
 def scorable_block_completion(sender, **kwargs):  # pylint: disable=unused-argument

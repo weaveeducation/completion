@@ -5,7 +5,7 @@ from django.db import migrations, models
 import django.utils.timezone
 from django.conf import settings
 import model_utils.fields
-from opaque_keys.edx.django.models import CourseKeyField, UsageKeyField
+from openedx.core.djangoapps.xmodule_django.models import CourseKeyField, UsageKeyField
 
 from completion.models import validate_percent
 
