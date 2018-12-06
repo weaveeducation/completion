@@ -1,12 +1,13 @@
 """
 Completion tracking and aggregation models.
 """
-
 from __future__ import absolute_import, division, print_function, unicode_literals
 
+import logging
+
 from django.contrib.auth.models import User
-from django.core.exceptions import ValidationError
-from django.db import models, transaction
+from django.core.exceptions import ValidationError, ObjectDoesNotExist
+from django.db import models, transaction, IntegrityError
 from django.utils.translation import ugettext as _
 
 from model_utils.models import TimeStampedModel
@@ -22,6 +23,9 @@ try:
 except ImportError:
     from .fields import BigAutoField
 # pylint: enable=ungrouped-imports
+
+
+log = logging.getLogger(__name__)
 
 
 def validate_percent(value):
@@ -89,17 +93,40 @@ class BlockCompletionManager(models.Manager):
             )
 
         if waffle.waffle().is_enabled(waffle.ENABLE_COMPLETION_TRACKING):
-            obj, is_new = self.get_or_create(  # pylint: disable=unpacking-non-sequence
-                user=user,
-                course_key=course_key,
-                block_type=block_type,
-                block_key=block_key,
-                defaults={'completion': completion},
-            )
-            if not is_new and obj.completion != completion:
+            obj = None
+            try:
+                with transaction.atomic():
+                    obj, is_new = self.get_or_create(  # pylint: disable=unpacking-non-sequence
+                        user=user,
+                        course_key=course_key,
+                        block_key=block_key,
+                        defaults={
+                            'completion': completion,
+                            'block_type': block_type,
+                        },
+                    )
+            except IntegrityError:
+                # The completion was created concurrently by another process
+                log.info(
+                    "An IntegrityError was raised when trying to create a BlockCompletion for %s:%s:%s.  "
+                    "Falling back to get().",
+                    user,
+                    course_key,
+                    block_key,
+                )
+                is_new = False
+                try:
+                    obj = self.get(
+                        user=user,
+                        course_key=course_key,
+                        block_key=block_key,
+                    )
+                except ObjectDoesNotExist:
+                    pass
+            if not is_new and obj and obj.completion != completion:
                 obj.completion = completion
                 obj.full_clean()
-                obj.save()
+                obj.save(update_fields={'completion', 'modified'})
         else:
             # If the feature is not enabled, this method should not be called.  Error out with a RuntimeError.
             raise RuntimeError(
@@ -141,7 +168,8 @@ class BlockCompletionManager(models.Manager):
         block_completions = {}
         for block, completion in blocks:
             (block_completion, is_new) = self.submit_completion(user, course_key, block, completion)
-            block_completions[block_completion] = is_new
+            if block_completion:
+                block_completions[block_completion] = is_new
         return block_completions
 
 
