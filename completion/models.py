@@ -4,10 +4,11 @@ Completion tracking and aggregation models.
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import logging
+import time
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError, ObjectDoesNotExist
-from django.db import models, transaction, IntegrityError
+from django.db import models, transaction, IntegrityError, OperationalError
 from django.utils.translation import ugettext as _
 
 from model_utils.models import TimeStampedModel
@@ -94,39 +95,53 @@ class BlockCompletionManager(models.Manager):
 
         if waffle.waffle().is_enabled(waffle.ENABLE_COMPLETION_TRACKING):
             obj = None
-            try:
-                with transaction.atomic():
-                    obj, is_new = self.get_or_create(  # pylint: disable=unpacking-non-sequence
-                        user=user,
-                        course_key=course_key,
-                        block_key=block_key,
-                        defaults={
-                            'completion': completion,
-                            'block_type': block_type,
-                        },
-                    )
-            except IntegrityError:
-                # The completion was created concurrently by another process
-                log.info(
-                    "An IntegrityError was raised when trying to create a BlockCompletion for %s:%s:%s.  "
-                    "Falling back to get().",
-                    user,
-                    course_key,
-                    block_key,
-                )
-                is_new = False
+            is_new = None
+            max_attempts = 2
+            current_attempt = 0
+            in_progress = True
+            while in_progress:
                 try:
-                    obj = self.get(
-                        user=user,
-                        course_key=course_key,
-                        block_key=block_key,
-                    )
-                except ObjectDoesNotExist:
-                    pass
-            if not is_new and obj and obj.completion != completion:
-                obj.completion = completion
-                obj.full_clean()
-                obj.save(update_fields={'completion', 'modified'})
+                    try:
+                        with transaction.atomic():
+                            obj, is_new = self.get_or_create(  # pylint: disable=unpacking-non-sequence
+                                user=user,
+                                course_key=course_key,
+                                block_key=block_key,
+                                defaults={
+                                    'completion': completion,
+                                    'block_type': block_type,
+                                },
+                            )
+                    except IntegrityError:
+                        # The completion was created concurrently by another process
+                        log.info(
+                            "An IntegrityError was raised when trying to create a BlockCompletion for %s:%s:%s.  "
+                            "Falling back to get().",
+                            user,
+                            course_key,
+                            block_key,
+                        )
+                        is_new = False
+                        try:
+                            obj = self.get(
+                                user=user,
+                                course_key=course_key,
+                                block_key=block_key,
+                            )
+                        except ObjectDoesNotExist:
+                            pass
+                    if not is_new and obj and obj.completion != completion:
+                        obj.completion = completion
+                        obj.full_clean()
+                        obj.save(update_fields={'completion', 'modified'})
+                    in_progress = False
+                except OperationalError, e:
+                    if current_attempt < max_attempts:
+                        current_attempt += 1
+                        time.sleep(3)
+                    else:
+                        log.error('Failed to save course usage: ' + str(e))
+                        in_progress = False
         else:
             # If the feature is not enabled, this method should not be called.  Error out with a RuntimeError.
             raise RuntimeError(
