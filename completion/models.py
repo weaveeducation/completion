@@ -187,6 +187,34 @@ class BlockCompletionManager(models.Manager):
                 block_completions[block_completion] = is_new
         return block_completions
 
+    def clear_completion(self, user, course_key):
+        """
+        Performs a clearing of completion objects.
+
+        Parameters:
+            * user (django.contrib.auth.models.User): The user for whom the
+              completions are being submitted.
+            * course_key (opaque_keys.edx.keys.CourseKey): The course in
+              which the submitted blocks are found.
+
+        Return Value:
+            Number of deleted items.
+
+        Raises:
+
+            ValueError:
+                If the wrong type is passed for one of the parameters.
+
+            django.db.DatabaseError:
+                If there was a problem getting, creating, or updating the
+                BlockCompletion record in the database.
+        """
+        qs = BlockCompletion.objects.filter(user=user, course_key=course_key)
+        count = qs.count()
+        if count > 0:
+            qs.delete()
+        return count
+
 
 # pylint: disable=model-has-unicode
 class BlockCompletion(TimeStampedModel, models.Model):
