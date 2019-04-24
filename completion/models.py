@@ -5,10 +5,11 @@ Completion tracking and aggregation models.
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import logging
+import time
 
 from django.contrib.auth.models import User
-from django.core.exceptions import ValidationError
-from django.db import IntegrityError, models, transaction
+from django.core.exceptions import ValidationError, ObjectDoesNotExist
+from django.db import IntegrityError, models, transaction, OperationalError
 from django.utils.translation import ugettext as _
 
 from model_utils.models import TimeStampedModel
@@ -92,36 +93,54 @@ class BlockCompletionManager(models.Manager):
                 "block_key must be an instance of `opaque_keys.edx.keys.UsageKey`.  Got {}".format(type(block_key))
             )
         if waffle.waffle().is_enabled(waffle.ENABLE_COMPLETION_TRACKING):
-            try:
-                with transaction.atomic():
-                    obj, is_new = self.get_or_create(  # pylint: disable=unpacking-non-sequence
-                        user=user,
-                        course_key=course_key,
-                        block_key=block_key,
-                        defaults={
-                            'completion': completion,
-                            'block_type': block_type,
-                        },
-                    )
-            except IntegrityError:
-                # The completion was created concurrently by another process
-                log.info(
-                    "An IntegrityError was raised when trying to create a BlockCompletion for %s:%s:%s.  "
-                    "Falling back to get().",
-                    user,
-                    course_key,
-                    block_key,
-                )
-                obj = self.get(
-                    user=user,
-                    course_key=course_key,
-                    block_key=block_key,
-                )
-                is_new = False
-            if not is_new and obj.completion != completion:
-                obj.completion = completion
-                obj.full_clean()
-                obj.save(update_fields={'completion', 'modified'})
+            obj = None
+            is_new = None
+            max_attempts = 2
+            current_attempt = 0
+            in_progress = True
+            while in_progress:
+                try:
+                    try:
+                        with transaction.atomic():
+                            obj, is_new = self.get_or_create(  # pylint: disable=unpacking-non-sequence
+                                user=user,
+                                course_key=course_key,
+                                block_key=block_key,
+                                defaults={
+                                    'completion': completion,
+                                    'block_type': block_type,
+                                },
+                            )
+                    except IntegrityError:
+                        # The completion was created concurrently by another process
+                        log.info(
+                            "An IntegrityError was raised when trying to create a BlockCompletion for %s:%s:%s.  "
+                            "Falling back to get().",
+                            user,
+                            course_key,
+                            block_key,
+                        )
+                        is_new = False
+                        try:
+                            obj = self.get(
+                                user=user,
+                                course_key=course_key,
+                                block_key=block_key,
+                            )
+                        except ObjectDoesNotExist:
+                            pass
+                    if not is_new and obj and obj.completion != completion:
+                        obj.completion = completion
+                        obj.full_clean()
+                        obj.save(update_fields={'completion', 'modified'})
+                    in_progress = False
+                except OperationalError, e:
+                    if current_attempt < max_attempts:
+                        current_attempt += 1
+                        time.sleep(3)
+                    else:
+                        log.error('Failed to save course usage: ' + str(e))
+                        in_progress = False
         else:
             # If the feature is not enabled, this method should not be called.
             # Error out with a RuntimeError.
@@ -165,8 +184,32 @@ class BlockCompletionManager(models.Manager):
         block_completions = {}
         for block, completion in blocks:
             (block_completion, is_new) = self.submit_completion(user, course_key, block, completion)
-            block_completions[block_completion] = is_new
+            if block_completion:
+                block_completions[block_completion] = is_new
         return block_completions
+
+    def clear_completion(self, user, course_key):
+        """
+        Performs a clearing of completion objects.
+        Parameters:
+            * user (django.contrib.auth.models.User): The user for whom the
+              completions are being submitted.
+            * course_key (opaque_keys.edx.keys.CourseKey): The course in
+              which the submitted blocks are found.
+        Return Value:
+            Number of deleted items.
+        Raises:
+            ValueError:
+                If the wrong type is passed for one of the parameters.
+            django.db.DatabaseError:
+                If there was a problem getting, creating, or updating the
+                BlockCompletion record in the database.
+        """
+        qs = BlockCompletion.objects.filter(user=user, course_key=course_key)
+        count = qs.count()
+        if count > 0:
+            qs.delete()
+        return count
 
 
 # pylint: disable=model-has-unicode
