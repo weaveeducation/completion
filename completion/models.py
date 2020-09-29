@@ -207,7 +207,7 @@ class BlockCompletionManager(models.Manager):
                 If there was a problem getting, creating, or updating the
                 BlockCompletion record in the database.
         """
-        qs = BlockCompletion.objects.filter(user=user, course_key=course_key)
+        qs = BlockCompletion.objects.filter(user=user, context_key=course_key)
         count = qs.count()
         if count > 0:
             qs.delete()
